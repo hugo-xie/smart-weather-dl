@@ -1,0 +1,136 @@
+"""
+台风路径预测 - Conditional GAN (WGAN-GP)
+==============================================
+条件GAN生成台风未来轨迹
+使用WGAN-GP提升训练稳定性
+依赖: pip install torch numpy pandas
+==============================================
+"""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+import numpy as np
+
+
+class TyphoonGenerator(nn.Module):
+    """
+    台风轨迹生成器
+    
+    输入: 历史轨迹 + 随机噪声
+    输出: 未来轨迹
+    """
+    def __init__(self, input_len=12, input_size=4, noise_dim=32, output_len=4, output_size=2, hidden_size=128):
+        super().__init__()
+        self.noise_dim = noise_dim
+        self.output_len = output_len
+        self.encoder = nn.LSTM(input_size, hidden_size, num_layers=2, batch_first=True, bidirectional=True)
+        self.noise_proj = nn.Sequential(nn.Linear(noise_dim, hidden_size), nn.LeakyReLU(0.2))
+        self.decoder = nn.LSTM(output_size + hidden_size * 2, hidden_size, num_layers=2, batch_first=True)
+        self.output_proj = nn.Linear(hidden_size, output_size)
+    
+    def forward(self, condition, noise=None):
+        B, device = condition.shape[0], condition.device
+        if noise is None: noise = torch.randn(B, self.noise_dim, device=device)
+        enc_out, (h, c) = self.encoder(condition)
+        context = torch.cat([h[-2], h[-1]], dim=1)
+        noise_feat = self.noise_proj(noise)
+        decoder_input = condition[:, -1:, :2]
+        predictions = []
+        h_dec = torch.zeros(2, B, 128, device=device)
+        c_dec = torch.zeros(2, B, 128, device=device)
+        for t in range(self.output_len):
+            combined = torch.cat([decoder_input, context.unsqueeze(1), noise_feat.unsqueeze(1)], dim=2)
+            out, (h_dec, c_dec) = self.decoder(combined, (h_dec, c_dec))
+            pred = self.output_proj(out)
+            predictions.append(pred)
+            decoder_input = pred
+        return torch.cat(predictions, dim=1)
+
+
+class TyphoonDiscriminator(nn.Module):
+    """台风轨迹判别器 (WGAN, 无Sigmoid)"""
+    def __init__(self, input_len=12, input_size=4, output_len=4, output_size=2, hidden_size=128):
+        super().__init__()
+        self.cond_encoder = nn.LSTM(input_size, hidden_size, num_layers=2, batch_first=True, bidirectional=True)
+        self.traj_encoder = nn.LSTM(output_size, hidden_size, num_layers=2, batch_first=True, bidirectional=True)
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_size * 4, 256), nn.LeakyReLU(0.2), nn.Dropout(0.3),
+            nn.Linear(256, 64), nn.LeakyReLU(0.2), nn.Linear(64, 1)
+        )
+    
+    def forward(self, condition, trajectory):
+        _, (h_c, _) = self.cond_encoder(condition)
+        cond_feat = torch.cat([h_c[-2], h_c[-1]], dim=1)
+        _, (h_t, _) = self.traj_encoder(trajectory)
+        traj_feat = torch.cat([h_t[-2], h_t[-1]], dim=1)
+        return self.classifier(torch.cat([cond_feat, traj_feat], dim=1))
+
+
+def compute_gradient_penalty(discriminator, condition, real_traj, fake_traj, device):
+    alpha = torch.rand(real_traj.shape[0], 1, 1, device=device)
+    interpolated = (alpha * real_traj + (1 - alpha) * fake_traj).requires_grad_(True)
+    d_interpolated = discriminator(condition, interpolated)
+    gradients = torch.autograd.grad(outputs=d_interpolated, inputs=interpolated,
+                                     grad_outputs=torch.ones_like(d_interpolated),
+                                     create_graph=True, retain_graph=True)[0]
+    return ((gradients.view(gradients.shape[0], -1).norm(2, dim=1) - 1) ** 2).mean()
+
+
+def train_typhoon_gan(netG, netD, train_loader, num_epochs=100, lr_g=1e-4, lr_d=1e-4, n_critic=5, lambda_gp=10):
+    """WGAN-GP训练"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    netG, netD = netG.to(device), netD.to(device)
+    opt_G = optim.Adam(netG.parameters(), lr=lr_g, betas=(0.0, 0.9))
+    opt_D = optim.Adam(netD.parameters(), lr=lr_d, betas=(0.0, 0.9))
+    
+    for epoch in range(num_epochs):
+        g_loss_total = d_loss_total = 0.0
+        for x_b, y_b in train_loader:
+            x_b, y_b = x_b.to(device), y_b.to(device)
+            
+            # 训练判别器 (n_critic次)
+            for _ in range(n_critic):
+                opt_D.zero_grad()
+                fake_traj = netG(x_b).detach()
+                gp = compute_gradient_penalty(netD, x_b, y_b, fake_traj, device)
+                d_loss = -netD(x_b, y_b).mean() + netD(x_b, fake_traj).mean() + lambda_gp * gp
+                d_loss.backward(); opt_D.step()
+                d_loss_total += d_loss.item()
+            
+            # 训练生成器
+            opt_G.zero_grad()
+            fake_traj = netG(x_b)
+            g_adv = -netD(x_b, fake_traj).mean()
+            g_rec = nn.functional.mse_loss(fake_traj, y_b)
+            g_loss = g_adv + 10.0 * g_rec
+            g_loss.backward(); opt_G.step()
+            g_loss_total += g_loss.item()
+        
+        if (epoch + 1) % 20 == 0:
+            print(f"Epoch [{epoch+1}/{num_epochs}] G: {g_loss_total/len(train_loader):.4f} | D: {d_loss_total/(len(train_loader)*n_critic):.4f}")
+            torch.save(netG.state_dict(), 'best_typhoon_gan_g.pth')
+    return netG, netD
+
+
+if __name__ == '__main__':
+    print("台风路径预测 - Conditional GAN (WGAN-GP) 训练")
+    from typhoon_cnn import IBTrACSDataset, load_ibtracs_data
+    
+    tracks = load_ibtracs_data('ibtracs_wp.csv')
+    dataset = IBTrACSDataset(tracks=tracks, input_len=12, output_len=4)
+    train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+    
+    netG = TyphoonGenerator(input_len=12, input_size=4, noise_dim=32, output_len=4)
+    netD = TyphoonDiscriminator(input_len=12, input_size=4, output_len=4)
+    print(f"生成器: {sum(p.numel() for p in netG.parameters()):,} | 判别器: {sum(p.numel() for p in netD.parameters()):,}")
+    
+    netG, netD = train_typhoon_gan(netG, netD, train_loader, num_epochs=100, n_critic=5, lambda_gp=10)
+    
+    # 演示多样性生成
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    x_s, _ = next(iter(train_loader))
+    trajectories = [netG(x_s[:1].to(device)).detach().cpu().numpy() for _ in range(20)]
+    print(f"生成轨迹多样性(std): {np.array(trajectories).std():.4f}")
+    print("训练完成!")

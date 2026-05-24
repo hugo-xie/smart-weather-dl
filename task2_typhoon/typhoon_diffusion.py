@@ -1,0 +1,144 @@
+"""
+台风路径预测 - Diffusion Model (条件扩散)
+==============================================
+条件扩散模型生成概率性台风轨迹
+特点: 生成轨迹集合, 量化预报不确定性
+依赖: pip install torch numpy pandas
+==============================================
+"""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+import numpy as np
+import math
+
+
+class TrajectoryDenoiser(nn.Module):
+    """
+    轨迹去噪网络 (Transformer架构)
+    
+    输入: 带噪轨迹 + 时间步 + 历史条件
+    输出: 预测的噪声
+    """
+    def __init__(self, output_len=4, output_size=2, input_len=12, input_size=4,
+                 d_model=128, nhead=4, num_layers=4):
+        super().__init__()
+        self.output_len = output_len
+        
+        self.time_embed = nn.Sequential(
+            nn.Linear(1, d_model), nn.SiLU(), nn.Linear(d_model, d_model)
+        )
+        self.condition_encoder = nn.Sequential(nn.Linear(input_size, d_model), nn.LayerNorm(d_model))
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, d_model*2, dropout=0.1, batch_first=True)
+        self.cond_transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        self.noisy_embed = nn.Sequential(nn.Linear(output_size, d_model), nn.LayerNorm(d_model))
+        decoder_layer = nn.TransformerDecoderLayer(d_model, nhead, d_model*2, dropout=0.1, batch_first=True)
+        self.denoiser = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        self.output_proj = nn.Linear(d_model, output_size)
+    
+    def forward(self, x_t, t, condition):
+        t_norm = (t.float() / 1000.0).unsqueeze(1)
+        t_emb = self.time_embed(t_norm).unsqueeze(1)
+        cond_memory = self.cond_transformer(self.condition_encoder(condition))
+        noisy_emb = self.noisy_embed(x_t) + t_emb
+        output = self.denoiser(noisy_emb, cond_memory)
+        return self.output_proj(output)
+
+
+class TyphoonDDPM:
+    """台风轨迹预测扩散模型 (Cosine调度)"""
+    def __init__(self, model, num_timesteps=500):
+        self.model = model
+        self.T = num_timesteps
+        steps = torch.arange(num_timesteps + 1, dtype=torch.float)
+        alphas_cumprod = torch.cos(((steps / num_timesteps) + 0.008) / 1.008 * math.pi / 2) ** 2
+        alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+        self.betas = torch.clamp(1 - alphas_cumprod[1:] / alphas_cumprod[:-1], 0, 0.999)
+        self.alphas = 1.0 - self.betas
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.alphas_cumprod_prev = torch.cat([torch.tensor([1.0]), self.alphas_cumprod[:-1]])
+        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
+    
+    def q_sample(self, x_0, t, noise=None):
+        if noise is None: noise = torch.randn_like(x_0)
+        device = x_0.device
+        sa = self.sqrt_alphas_cumprod[t].to(device).view(-1, 1, 1)
+        sm = self.sqrt_one_minus_alphas_cumprod[t].to(device).view(-1, 1, 1)
+        return sa * x_0 + sm * noise
+    
+    def p_losses(self, x_0, condition, t):
+        noise = torch.randn_like(x_0)
+        x_noisy = self.q_sample(x_0, t, noise)
+        return nn.functional.mse_loss(self.model(x_noisy, t, condition), noise)
+    
+    @torch.no_grad()
+    def sample(self, condition, n_samples=10):
+        """生成n_samples条轨迹 (概率性预报)"""
+        device = condition.device
+        B = condition.shape[0]
+        all_samples = []
+        for _ in range(n_samples):
+            x = torch.randn(B, self.model.output_len, 2, device=device)
+            for t in reversed(range(self.T)):
+                t_batch = torch.full((B,), t, device=device, dtype=torch.long)
+                pred_noise = self.model(x, t_batch, condition)
+                alpha = self.alphas[t].to(device)
+                alpha_cumprod = self.alphas_cumprod[t].to(device)
+                beta = self.betas[t].to(device)
+                mean = (1 / torch.sqrt(alpha)) * (x - (beta / torch.sqrt(1 - alpha_cumprod)) * pred_noise)
+                if t > 0:
+                    pv = beta * (1 - self.alphas_cumprod_prev[t]) / (1 - alpha_cumprod)
+                    x = mean + torch.sqrt(pv.to(device)) * torch.randn_like(mean)
+                else:
+                    x = mean
+            all_samples.append(x)
+        return torch.stack(all_samples)
+
+
+def train_typhoon_diffusion(ddpm, train_loader, num_epochs=100, lr=1e-4):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    ddpm.model = ddpm.model.to(device)
+    optimizer = optim.AdamW(ddpm.model.parameters(), lr=lr, weight_decay=0.01)
+    
+    for epoch in range(num_epochs):
+        ddpm.model.train()
+        epoch_loss = 0.0
+        for x_b, y_b in train_loader:
+            x_b, y_b = x_b.to(device), y_b.to(device)
+            t = torch.randint(0, ddpm.T, (y_b.shape[0],), device=device)
+            optimizer.zero_grad()
+            loss = ddpm.p_losses(y_b, x_b, t)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(ddpm.model.parameters(), 1.0)
+            optimizer.step()
+            epoch_loss += loss.item()
+        
+        epoch_loss /= len(train_loader)
+        if (epoch + 1) % 20 == 0:
+            print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {epoch_loss:.6f}")
+    return ddpm
+
+
+if __name__ == '__main__':
+    print("台风路径预测 - Diffusion Model 训练")
+    from typhoon_cnn import IBTrACSDataset, load_ibtracs_data
+    
+    tracks = load_ibtracs_data('ibtracs_wp.csv')
+    dataset = IBTrACSDataset(tracks=tracks, input_len=12, output_len=4)
+    train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+    
+    denoiser = TrajectoryDenoiser(output_len=4, output_size=2, input_len=12, input_size=4, d_model=64, nhead=4, num_layers=3)
+    ddpm = TyphoonDDPM(denoiser, num_timesteps=200)
+    print(f"去噪网络参数量: {sum(p.numel() for p in denoiser.parameters()):,}")
+    
+    ddpm = train_typhoon_diffusion(ddpm, train_loader, num_epochs=100)
+    
+    # 演示概率性预报
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    x_s, _ = next(iter(train_loader))
+    trajectories = ddpm.sample(x_s[:1].to(device), n_samples=20)
+    print(f"生成轨迹集合: {trajectories.shape} | 不确定性(std): {trajectories.std():.4f}")
+    print("训练完成!")

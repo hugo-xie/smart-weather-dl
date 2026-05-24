@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Data files (large, download separately)
+*.nc
+*.nc4
+*.h5
+*.hdf5
+*.csv
+ibtracs_*.csv
+era5_*.nc
+
+# Model checkpoints
+*.pth
+*.pt
+*.ckpt
+best_*.pth
+
+# Logs
+*.log
+runs/
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Results
+results/
+outputs/
+figures/
