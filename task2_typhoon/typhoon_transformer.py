@@ -142,3 +142,36 @@ if __name__ == '__main__':
     
     model = train_typhoon_transformer(model, train_loader, val_loader, num_epochs=80)
     print("训练完成!")
+
+
+# ============================================================
+# 思考题 & 动手练习
+# Exercises & Hands-on Practice
+# ============================================================
+#
+# ⭐ 入门题 1
+# 尝试将 Warmup 步数分别设为 0（无 Warmup）、500、1000、2000，
+# 观察 Warmup 对 Transformer 训练稳定性的影响。
+# 为什么 Transformer 比 LSTM 更需要 Warmup 学习率调度？
+#
+# 💡 提示: 修改 train_typhoon_transformer(warmup_steps=N)，
+#          用 matplotlib 画出学习率随训练步的变化曲线，
+#          对比不同 Warmup 的训练损失
+#
+# ⭐⭐ 进阶题 2
+# 尝试将自回归推理（逐步生成）改为一次性预测所有时次
+# （类似 BERT 的非自回归模式），对比两种推理方式在
+# 预测精度和推理速度上的差异。自回归推理有什么优劣势？
+#
+# 💡 提示: 在 TyphoonTransformer.forward() 中，
+#          尝试将解码器输入改为全零序列，一次性输出所有时次的预测，
+#          对比推理耗时和 Haversine 误差
+#
+# ⭐⭐⭐ 挑战题 3
+# 在台风预测中，尝试将台风强度类型编码为 one-hot 向量
+# 并与特征拼接加入模型，观察对不同强度级别台风的预测精度影响。
+# 强台风和弱台风的轨迹预测难度有何差异？
+#
+# 💡 提示: 根据 WMO_WIND 将台风分为 4 级（TD/TS/TY/STY），
+#          编码为 one-hot 并拼接到输入特征（input_size 从 4 变为 8），
+#          对比各级别台风的平均 Haversine 误差

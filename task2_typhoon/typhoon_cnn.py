@@ -213,3 +213,34 @@ if __name__ == '__main__':
     
     model = train_typhoon_cnn(model, train_loader, val_loader, num_epochs=50)
     print("训练完成! 下一步: 下载真实IBTrACS数据替换模拟数据")
+
+
+# ============================================================
+# 思考题 & 动手练习
+# Exercises & Hands-on Practice
+# ============================================================
+#
+# ⭐ 入门题 1
+# 尝试将输入特征从 4 个（lat, lon, wind, pres）扩展到 8 个，
+# 新增速度特征（dlat, dlon）和加速度特征（d2lat, d2lon）。
+# 这些运动学特征能带来多大的性能提升？
+#
+# 💡 提示: 在 IBTrACSDataset._normalize_track() 中计算：
+#          dlat = lat[t] - lat[t-1]，dlon = lon[t] - lon[t-1]
+#          将特征维度从 4 改为 8，同时修改 TyphoonCNN(num_features=8)
+#
+# ⭐ 入门题 2
+# 尝试将预测时长（output_len）从 4 个时次（24小时）
+# 延长到 8 个时次（48小时），观察预测误差随预测时长增加的变化规律。
+# 为什么长期预测误差增长更快？
+#
+# 💡 提示: 修改 IBTrACSDataset(output_len=8) 和 TyphoonCNN(output_len=8)，
+#          分别记录 24h/48h 的 Haversine 误差（km）
+#
+# ⭐⭐ 进阶题 3
+# 尝试将全局平均池化（AdaptiveAvgPool1d）改为全局最大池化
+# （AdaptiveMaxPool1d），对比两种池化方式对台风路径预测的影响。
+# 平均池化和最大池化分别保留了哪种时序信息？
+#
+# 💡 提示: 将 self.pool = nn.AdaptiveAvgPool1d(1) 改为
+#          nn.AdaptiveMaxPool1d(1)，对比验证集 Haversine 误差

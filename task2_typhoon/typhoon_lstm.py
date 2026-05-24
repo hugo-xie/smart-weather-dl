@@ -150,3 +150,38 @@ if __name__ == '__main__':
     
     model = train_typhoon_lstm(model, train_loader, val_loader, num_epochs=80)
     print("训练完成!")
+
+
+# ============================================================
+# 思考题 & 动手练习
+# Exercises & Hands-on Practice
+# ============================================================
+#
+# ⭐ 入门题 1
+# Teacher Forcing 比例当前从 0.5 线性衰减到 0。
+# 尝试将衰减速度加快（每个 epoch 减少 0.02）和减慢（减少 0.002），
+# 观察对训练收敛和最终性能的影响。
+# 为什么 Teacher Forcing 不能一直保持为 1？
+#
+# 💡 提示: 修改 train_typhoon_lstm() 中的：
+#          tf_ratio = max(0.0, 0.5 - epoch * decay_rate)
+#          对比不同 decay_rate 的训练曲线
+#
+# ⭐⭐ 进阶题 2
+# 尝试将编码器的层数（num_encoder_layers）从 2 增加到 4，
+# 并将隐层大小（hidden_size）从 64 增加到 256。
+# 对比参数量和性能的关系，讨论台风预测任务中模型大小的合适范围。
+#
+# 💡 提示: 修改 TyphoonSeq2SeqLSTM(num_encoder_layers=N, hidden_size=M)，
+#          用 sum(p.numel() for p in model.parameters()) 记录参数量，
+#          对比验证集 Haversine 误差
+#
+# ⭐⭐⭐ 挑战题 3
+# 尝试将 Bahdanau 注意力替换为点积注意力（Dot-Product Attention），
+# 对比两种注意力机制在训练效率和预测精度上的差异。
+# 点积注意力为什么计算更高效？
+#
+# 💡 提示: 将 Attention.forward() 中的加性注意力改为：
+#          scores = torch.bmm(decoder_hidden.unsqueeze(1),
+#                             encoder_outputs.transpose(1,2)) / sqrt(d)
+#          对比训练速度（每 epoch 耗时）

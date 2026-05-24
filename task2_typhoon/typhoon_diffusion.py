@@ -142,3 +142,38 @@ if __name__ == '__main__':
     trajectories = ddpm.sample(x_s[:1].to(device), n_samples=20)
     print(f"生成轨迹集合: {trajectories.shape} | 不确定性(std): {trajectories.std():.4f}")
     print("训练完成!")
+
+
+# ============================================================
+# 思考题 & 动手练习
+# Exercises & Hands-on Practice
+# ============================================================
+#
+# ⭐ 入门题 1
+# 对同一个历史轨迹输入，分别生成 5、10、20、50 条轨迹，
+# 计算轨迹集合的平均误差和标准差。
+# 随着样本数增加，误差和不确定性估计是否趋于收敛？
+#
+# 💡 提示: 多次调用 ddpm.sample(condition, n_samples=1)，
+#          对返回的轨迹列表计算 np.array(trajectories).mean(0)
+#          和 np.array(trajectories).std(0)，
+#          用 matplotlib 画出轨迹集合图
+#
+# ⭐⭐ 进阶题 2
+# 尝试将条件编码器从 Transformer 改为 LSTM，
+# 对比两种条件编码器对扩散模型生成质量的影响。
+# 对于台风轨迹这种时序条件，哪种编码器更合适？
+#
+# 💡 提示: 将 TrajectoryDenoiser 中的 cond_transformer 替换为
+#          nn.LSTM(input_size, d_model, batch_first=True)，
+#          对比训练损失和生成轨迹的 Haversine 误差
+#
+# ⭐⭐⭐ 挑战题 3
+# 尝试将扩散模型的输出从仅预测位置（lat, lon）
+# 扩展到同时预测强度（wind, pres），
+# 实现台风轨迹+强度的联合概率预报。
+# 联合预测相比单独预测位置有什么优势？
+#
+# 💡 提示: 将 output_size 从 2 改为 4，
+#          同时修改 IBTrACSDataset 的 y 包含 wind 和 pres，
+#          对比联合预测和单独预测位置的 Haversine 误差

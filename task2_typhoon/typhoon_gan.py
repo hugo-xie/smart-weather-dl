@@ -134,3 +134,37 @@ if __name__ == '__main__':
     trajectories = [netG(x_s[:1].to(device)).detach().cpu().numpy() for _ in range(20)]
     print(f"生成轨迹多样性(std): {np.array(trajectories).std():.4f}")
     print("训练完成!")
+
+
+# ============================================================
+# 思考题 & 动手练习
+# Exercises & Hands-on Practice
+# ============================================================
+#
+# ⭐ 入门题 1
+# 尝试将噪声维度（noise_dim）分别设为 4、16、64、256，
+# 观察噪声维度对生成轨迹多样性和误差的影响。
+# 噪声维度过小会导致什么问题？过大又会怎样？
+#
+# 💡 提示: 修改 TyphoonGenerator(noise_dim=N)，
+#          对同一输入生成 20 条轨迹，
+#          计算轨迹间的平均标准差衡量多样性
+#
+# ⭐⭐ 进阶题 2
+# 尝试将 n_critic（每训练一次生成器训练判别器的次数）
+# 分别设为 1、3、5、10，观察对 WGAN-GP 训练稳定性的影响。
+# n_critic 过小或过大分别会导致什么问题？
+#
+# 💡 提示: 修改 train_typhoon_gan(n_critic=N)，
+#          用 matplotlib 画出生成器损失和判别器损失的变化曲线，
+#          观察训练稳定性
+#
+# ⭐⭐⭐ 挑战题 3
+# WGAN-GP 中梯度惩罚系数 lambda_gp 当前为 10。
+# 尝试将其设为 1、5、10、50，对比对训练稳定性和生成质量的影响。
+# 梯度惩罚的理论依据是什么（Lipschitz 约束）？
+# 为什么 lambda_gp=10 被广泛采用？
+#
+# 💡 提示: 修改 train_typhoon_gan(lambda_gp=N)，
+#          记录判别器损失和梯度惩罚项的大小，
+#          观察不同 lambda_gp 下的 Wasserstein 距离变化

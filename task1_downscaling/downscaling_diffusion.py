@@ -195,3 +195,38 @@ if __name__ == '__main__':
     samples = np.array(samples)
     print(f"样本标准差 (不确定性): {samples.std():.4f}")
     print("训练完成!")
+
+
+# ============================================================
+# 思考题 & 动手练习
+# Exercises & Hands-on Practice
+# ============================================================
+#
+# ⭐ 入门题 1
+# 将扩散步数（num_timesteps）分别设为 50、100、500、1000，
+# 对比生成质量（RMSE）和推理速度的变化。
+# 步数越多生成质量一定越好吗？实际应用中如何平衡两者？
+#
+# 💡 提示: 修改 DDPM(num_timesteps=N)，
+#          用 time.time() 记录每次采样的耗时，同时记录生成样本的 RMSE
+#
+# ⭐⭐ 进阶题 2
+# 扩散模型的独特优势是可以生成多个样本来量化不确定性。
+# 请对同一个低分辨率输入生成 20 个高分辨率样本，
+# 计算这 20 个样本的像素级标准差，并可视化展示不确定性分布。
+#
+# 💡 提示: 调用 ddpm.sample(lr_condition, shape) 20 次，
+#          对结果列表计算 np.array(samples).std(axis=0)，
+#          即为每个像素的不确定性估计
+#
+# ⭐⭐⭐ 挑战题 3
+# 尝试将线性 Beta 调度改为 Cosine Beta 调度
+# （参考 Improved DDPM 论文，Nichol & Dhariwal, 2021），
+# 对比两种调度对训练稳定性和生成质量的影响。
+# Cosine 调度为什么在开始和结束阶段加噪更平滑？
+#
+# 💡 提示: 将 self.betas = torch.linspace(1e-4, 0.02, T) 改为：
+#          steps = torch.arange(T+1, dtype=torch.float)
+#          alphas_cumprod = torch.cos(((steps/T)+0.008)/1.008 * pi/2)**2
+#          alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+#          betas = torch.clamp(1 - alphas_cumprod[1:]/alphas_cumprod[:-1], 0, 0.999)

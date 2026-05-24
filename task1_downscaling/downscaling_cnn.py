@@ -253,3 +253,32 @@ if __name__ == '__main__':
         print(f"   {k}: {v:.4f}")
     
     print("\\n训练完成! 下一步: 替换模拟数据为真实ERA5数据")
+
+
+# ============================================================
+# 思考题 & 动手练习
+# Exercises & Hands-on Practice
+# ============================================================
+#
+# ⭐ 入门题 1
+# 尝试将残差块数量（num_residual_blocks）分别设为 2、4、8、16，
+# 训练后对比验证集上的 RMSE。残差块越多效果一定越好吗？
+# 讨论可能出现的过拟合现象。
+#
+# 💡 提示: 修改 DownscalingCNN(num_residual_blocks=N)，
+#          用 calculate_metrics() 记录每种配置的 RMSE 和 PSNR
+#
+# ⭐ 入门题 2
+# 将上采样方式从双线性插值（bilinear）改为双三次插值（bicubic）
+# 和最近邻插值（nearest），对比三种方式对最终高分辨率结果的影响。
+# 哪种上采样方式作为初始化最有利于后续卷积学习细节？
+#
+# 💡 提示: 修改 nn.Upsample(mode="bilinear") 中的 mode 参数，
+#          尝试 "bicubic" 和 "nearest"
+#
+# ⭐⭐ 进阶题 3
+# 尝试将损失函数从纯 MSE 改为 MSE + 0.1 × MAE 的组合损失，
+# 观察训练曲线和生成结果的变化。为什么 MAE 对异常值更鲁棒？
+#
+# 💡 提示: 在 train_model() 中将 criterion = nn.MSELoss() 改为：
+#          loss = mse_loss + 0.1 * mae_loss

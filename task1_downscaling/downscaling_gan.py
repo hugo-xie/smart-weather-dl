@@ -159,3 +159,37 @@ if __name__ == '__main__':
     
     netG, netD = train_gan(netG, netD, train_loader, num_epochs=60)
     print("训练完成!")
+
+
+# ============================================================
+# 思考题 & 动手练习
+# Exercises & Hands-on Practice
+# ============================================================
+#
+# ⭐ 入门题 1
+# 尝试将对抗损失的权重系数（当前为 0.001）分别设为
+# 0、0.0001、0.001、0.01，观察生成结果的变化。
+# 当权重为 0 时模型退化为什么？权重过大时又会出现什么问题？
+#
+# 💡 提示: 修改 train_gan() 中的 g_loss = g_content + λ * g_adv_loss，
+#          分别用 λ=0/0.0001/0.001/0.01 训练，对比 RMSE 和视觉质量
+#
+# ⭐⭐ 进阶题 2
+# GAN 训练中常见的问题是模式崩溃（Mode Collapse）。
+# 请尝试将标准 GAN 损失改为 Wasserstein 损失
+# （去掉判别器的 Sigmoid，将 BCELoss 改为直接计算期望），
+# 观察训练稳定性的变化。
+#
+# 💡 提示: 将 criterion_bce 改为 Wasserstein 损失：
+#          d_loss = -real_pred.mean() + fake_pred.mean()
+#          并将判别器最后一层的 Sigmoid 去掉
+#
+# ⭐⭐⭐ 挑战题 3
+# 尝试将亚像素卷积（Pixel Shuffle）上采样替换为
+# 转置卷积（ConvTranspose2d），对比两种上采样方式
+# 对生成图像中棋盘格伪影（Checkerboard Artifacts）的影响。
+# 为什么 Pixel Shuffle 通常优于转置卷积？
+#
+# 💡 提示: 将 PixelShuffleUpsampler 替换为：
+#          nn.ConvTranspose2d(channels, channels, 2, stride=2)
+#          用 matplotlib 可视化生成图像中的棋盘格模式
