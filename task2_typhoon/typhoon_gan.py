@@ -27,21 +27,30 @@ class TyphoonGenerator(nn.Module):
         self.output_len = output_len
         self.encoder = nn.LSTM(input_size, hidden_size, num_layers=2, batch_first=True, bidirectional=True)
         self.noise_proj = nn.Sequential(nn.Linear(noise_dim, hidden_size), nn.LeakyReLU(0.2))
-        self.decoder = nn.LSTM(output_size + hidden_size * 2, hidden_size, num_layers=2, batch_first=True)
+        # decoder输入维度: output_size + hidden_size*2(context) + hidden_size(noise)
+        decoder_input_size = output_size + hidden_size * 2 + hidden_size
+        self.decoder = nn.LSTM(decoder_input_size, hidden_size, num_layers=2, batch_first=True)
         self.output_proj = nn.Linear(hidden_size, output_size)
+        self.hidden_size = hidden_size
     
     def forward(self, condition, noise=None):
         B, device = condition.shape[0], condition.device
         if noise is None: noise = torch.randn(B, self.noise_dim, device=device)
         enc_out, (h, c) = self.encoder(condition)
-        context = torch.cat([h[-2], h[-1]], dim=1)
-        noise_feat = self.noise_proj(noise)
-        decoder_input = condition[:, -1:, :2]
+        # 合并双向编码器的隐状态作为 context
+        context = torch.cat([h[-2], h[-1]], dim=1)  # (B, hidden_size*2)
+        noise_feat = self.noise_proj(noise)           # (B, hidden_size)
+        decoder_input = condition[:, -1:, :2]         # (B, 1, output_size)
         predictions = []
-        h_dec = torch.zeros(2, B, 128, device=device)
-        c_dec = torch.zeros(2, B, 128, device=device)
+        h_dec = torch.zeros(2, B, self.hidden_size, device=device)
+        c_dec = torch.zeros(2, B, self.hidden_size, device=device)
         for t in range(self.output_len):
-            combined = torch.cat([decoder_input, context.unsqueeze(1), noise_feat.unsqueeze(1)], dim=2)
+            # combined: (B, 1, output_size + hidden_size*2 + hidden_size)
+            combined = torch.cat([
+                decoder_input,
+                context.unsqueeze(1),
+                noise_feat.unsqueeze(1)
+            ], dim=2)
             out, (h_dec, c_dec) = self.decoder(combined, (h_dec, c_dec))
             pred = self.output_proj(out)
             predictions.append(pred)
@@ -75,7 +84,7 @@ def compute_gradient_penalty(discriminator, condition, real_traj, fake_traj, dev
     gradients = torch.autograd.grad(outputs=d_interpolated, inputs=interpolated,
                                      grad_outputs=torch.ones_like(d_interpolated),
                                      create_graph=True, retain_graph=True)[0]
-    return ((gradients.view(gradients.shape[0], -1).norm(2, dim=1) - 1) ** 2).mean()
+    return ((gradients.reshape(gradients.shape[0], -1).norm(2, dim=1) - 1) ** 2).mean()
 
 
 def train_typhoon_gan(netG, netD, train_loader, num_epochs=100, lr_g=1e-4, lr_d=1e-4, n_critic=5, lambda_gp=10):

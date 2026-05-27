@@ -70,12 +70,17 @@ class DownscalingTransformer(nn.Module):
         self.hr_h, self.hr_w = hr_h, hr_w
         self.patch_size = patch_size
         
-        n_patches_h = lr_h // patch_size
-        n_patches_w = lr_w // patch_size
+        # 计算padding后的实际patch数（与extract_patches保持一致）
+        p = patch_size
+        lr_h_pad = lr_h + (p - lr_h % p) % p
+        lr_w_pad = lr_w + (p - lr_w % p) % p
+        n_patches_h = lr_h_pad // patch_size
+        n_patches_w = lr_w_pad // patch_size
         self.n_patches = n_patches_h * n_patches_w
         
         patch_dim = patch_size * patch_size
         self.patch_embedding = nn.Sequential(nn.Linear(patch_dim, d_model), nn.LayerNorm(d_model))
+        # +1 for CLS token
         self.pos_embedding = nn.Parameter(torch.randn(1, self.n_patches + 1, d_model) * 0.02)
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         

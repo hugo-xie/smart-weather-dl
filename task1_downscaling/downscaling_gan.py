@@ -61,7 +61,7 @@ class DownscalingGenerator(nn.Module):
 
 class PatchDiscriminator(nn.Module):
     """PatchGAN判别器 - 对局部patch进行真/假判断"""
-    def __init__(self):
+    def __init__(self, in_channels=1):
         super().__init__()
         def disc_block(in_ch, out_ch, stride=2, normalize=True):
             layers = [nn.Conv2d(in_ch, out_ch, 4, stride=stride, padding=1)]
@@ -69,7 +69,7 @@ class PatchDiscriminator(nn.Module):
             layers.append(nn.LeakyReLU(0.2, inplace=True))
             return layers
         self.model = nn.Sequential(
-            *disc_block(1, 64, normalize=False), *disc_block(64, 128),
+            *disc_block(in_channels, 64, normalize=False), *disc_block(64, 128),
             *disc_block(128, 256), *disc_block(256, 512, stride=1),
             nn.Conv2d(512, 1, 4, padding=1)
         )
