@@ -151,6 +151,9 @@ class DownscalingCNN(nn.Module):
 # ============================================================
 
 def train_model(model, train_loader, val_loader, num_epochs=50, lr=1e-4):
+    """
+    返回: (train_losses, val_losses) - 每个 epoch 的损失列表
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}")
     
@@ -160,6 +163,7 @@ def train_model(model, train_loader, val_loader, num_epochs=50, lr=1e-4):
     criterion = nn.MSELoss()
     
     best_val_loss = float('inf')
+    train_losses, val_losses = [], []
     
     for epoch in range(num_epochs):
         model.train()
@@ -187,6 +191,8 @@ def train_model(model, train_loader, val_loader, num_epochs=50, lr=1e-4):
         
         train_loss /= len(train_loader)
         val_loss /= len(val_loader)
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
         scheduler.step()
         
         if (epoch + 1) % 10 == 0:
@@ -196,7 +202,7 @@ def train_model(model, train_loader, val_loader, num_epochs=50, lr=1e-4):
             best_val_loss = val_loss
             torch.save(model.state_dict(), 'best_downscaling_cnn.pth')
     
-    return model
+    return train_losses, val_losses
 
 
 def calculate_metrics(pred, target):
@@ -236,7 +242,8 @@ if __name__ == '__main__':
     print(f"   参数量: {sum(p.numel() for p in model.parameters()):,}")
     
     print("\\n[3/4] 开始训练...")
-    model = train_model(model, train_loader, val_loader, num_epochs=NUM_EPOCHS)
+    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=NUM_EPOCHS)
+    print(f"   最终训练损失: {train_losses[-1]:.6f} | 验证损失: {val_losses[-1]:.6f}")
     
     print("\\n[4/4] 评估...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
