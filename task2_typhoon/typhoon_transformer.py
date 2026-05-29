@@ -129,7 +129,7 @@ if __name__ == '__main__':
     print("台风路径预测 - Transformer 训练")
     from typhoon_cnn import IBTrACSDataset, load_ibtracs_data
     
-    tracks = load_ibtracs_data('ibtracs_wp.csv')
+    tracks = load_ibtracs_data('/root/autodl-tmp/project/project/project/smart-weather-dl-main/dataset/ibtracs.WP.list.v04r00.csv')
     dataset = IBTrACSDataset(tracks=tracks, input_len=12, output_len=4)
     n_train = int(0.8 * len(dataset))
     train_set, val_set = torch.utils.data.random_split(dataset, [n_train, len(dataset)-n_train])
@@ -141,6 +141,14 @@ if __name__ == '__main__':
     print(f"参数量: {sum(p.numel() for p in model.parameters()):,}")
     
     model = train_typhoon_transformer(model, train_loader, val_loader, num_epochs=80)
+
+    from typhoon_utils import quick_test_and_plot
+    quick_test_and_plot(
+        model,
+        val_loader,
+        save_path='typhoon_transformer_prediction.png',
+        title='Transformer Typhoon Track Prediction'
+    )
     print("训练完成!")
 
 
