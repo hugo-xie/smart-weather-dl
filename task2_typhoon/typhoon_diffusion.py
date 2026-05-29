@@ -65,8 +65,10 @@ class TyphoonDDPM:
     def q_sample(self, x_0, t, noise=None):
         if noise is None: noise = torch.randn_like(x_0)
         device = x_0.device
-        sa = self.sqrt_alphas_cumprod[t].to(device).view(-1, 1, 1)
-        sm = self.sqrt_one_minus_alphas_cumprod[t].to(device).view(-1, 1, 1)
+        sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(device)
+        sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(device)
+        sa = sqrt_alphas_cumprod[t].view(-1, 1, 1)
+        sm = sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
         return sa * x_0 + sm * noise
     
     def p_losses(self, x_0, condition, t):
@@ -78,6 +80,10 @@ class TyphoonDDPM:
     def sample(self, condition, n_samples=10):
         """生成n_samples条轨迹 (概率性预报)"""
         device = condition.device
+        alphas = self.alphas.to(device)
+        betas = self.betas.to(device)
+        alphas_cumprod = self.alphas_cumprod.to(device)
+        alphas_cumprod_prev = self.alphas_cumprod_prev.to(device)
         B = condition.shape[0]
         all_samples = []
         for _ in range(n_samples):
@@ -85,13 +91,13 @@ class TyphoonDDPM:
             for t in reversed(range(self.T)):
                 t_batch = torch.full((B,), t, device=device, dtype=torch.long)
                 pred_noise = self.model(x, t_batch, condition)
-                alpha = self.alphas[t].to(device)
-                alpha_cumprod = self.alphas_cumprod[t].to(device)
-                beta = self.betas[t].to(device)
+                alpha = alphas[t]
+                alpha_cumprod = alphas_cumprod[t]
+                beta = betas[t]
                 mean = (1 / torch.sqrt(alpha)) * (x - (beta / torch.sqrt(1 - alpha_cumprod)) * pred_noise)
                 if t > 0:
-                    pv = beta * (1 - self.alphas_cumprod_prev[t]) / (1 - alpha_cumprod)
-                    x = mean + torch.sqrt(pv.to(device)) * torch.randn_like(mean)
+                    pv = beta * (1 - alphas_cumprod_prev[t]) / (1 - alpha_cumprod)
+                    x = mean + torch.sqrt(pv) * torch.randn_like(mean)
                 else:
                     x = mean
             all_samples.append(x)
@@ -126,9 +132,12 @@ if __name__ == '__main__':
     print("台风路径预测 - Diffusion Model 训练")
     from typhoon_cnn import IBTrACSDataset, load_ibtracs_data
     
-    tracks = load_ibtracs_data('ibtracs_wp.csv')
+    tracks = load_ibtracs_data('/root/autodl-tmp/project/project/project/smart-weather-dl-main/dataset/ibtracs.WP.list.v04r00.csv')
     dataset = IBTrACSDataset(tracks=tracks, input_len=12, output_len=4)
-    train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+    n_train = int(0.8 * len(dataset))
+    train_set, val_set = torch.utils.data.random_split(dataset, [n_train, len(dataset)-n_train])
+    train_loader = DataLoader(train_set, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=32, shuffle=False)
     
     denoiser = TrajectoryDenoiser(output_len=4, output_size=2, input_len=12, input_size=4, d_model=64, nhead=4, num_layers=3)
     ddpm = TyphoonDDPM(denoiser, num_timesteps=200)
@@ -136,11 +145,16 @@ if __name__ == '__main__':
     
     ddpm = train_typhoon_diffusion(ddpm, train_loader, num_epochs=100)
     
-    # 演示概率性预报
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    x_s, _ = next(iter(train_loader))
-    trajectories = ddpm.sample(x_s[:1].to(device), n_samples=20)
-    print(f"生成轨迹集合: {trajectories.shape} | 不确定性(std): {trajectories.std():.4f}")
+    ddpm.model.eval()
+
+    from typhoon_utils import quick_ensemble_test_and_plot
+    quick_ensemble_test_and_plot(
+        val_loader,
+        samples_fn=lambda x, n: ddpm.sample(x, n_samples=n),
+        save_path='typhoon_diffusion_prediction.png',
+        title='Diffusion Typhoon Ensemble Prediction',
+        n_samples=20
+    )
     print("训练完成!")
 
 
