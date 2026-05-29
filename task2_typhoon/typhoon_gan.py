@@ -13,6 +13,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
 
+torch.backends.cudnn.enabled = False
 
 class TyphoonGenerator(nn.Module):
     """
@@ -80,7 +81,9 @@ class TyphoonDiscriminator(nn.Module):
 def compute_gradient_penalty(discriminator, condition, real_traj, fake_traj, device):
     alpha = torch.rand(real_traj.shape[0], 1, 1, device=device)
     interpolated = (alpha * real_traj + (1 - alpha) * fake_traj).requires_grad_(True)
-    d_interpolated = discriminator(condition, interpolated)
+    # WGAN-GP needs double backward; cuDNN RNN does not support it.
+    with torch.backends.cudnn.flags(enabled=False):
+        d_interpolated = discriminator(condition, interpolated)
     gradients = torch.autograd.grad(outputs=d_interpolated, inputs=interpolated,
                                      grad_outputs=torch.ones_like(d_interpolated),
                                      create_graph=True, retain_graph=True)[0]
@@ -127,9 +130,12 @@ if __name__ == '__main__':
     print("台风路径预测 - Conditional GAN (WGAN-GP) 训练")
     from typhoon_cnn import IBTrACSDataset, load_ibtracs_data
     
-    tracks = load_ibtracs_data('ibtracs_wp.csv')
+    tracks = load_ibtracs_data('/root/autodl-tmp/project/project/project/smart-weather-dl-main/dataset/ibtracs.WP.list.v04r00.csv')
     dataset = IBTrACSDataset(tracks=tracks, input_len=12, output_len=4)
-    train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+    n_train = int(0.8 * len(dataset))
+    train_set, val_set = torch.utils.data.random_split(dataset, [n_train, len(dataset)-n_train])
+    train_loader = DataLoader(train_set, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=32, shuffle=False)
     
     netG = TyphoonGenerator(input_len=12, input_size=4, noise_dim=32, output_len=4)
     netD = TyphoonDiscriminator(input_len=12, input_size=4, output_len=4)
@@ -137,11 +143,16 @@ if __name__ == '__main__':
     
     netG, netD = train_typhoon_gan(netG, netD, train_loader, num_epochs=100, n_critic=5, lambda_gp=10)
     
-    # 演示多样性生成
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    x_s, _ = next(iter(train_loader))
-    trajectories = [netG(x_s[:1].to(device)).detach().cpu().numpy() for _ in range(20)]
-    print(f"生成轨迹多样性(std): {np.array(trajectories).std():.4f}")
+    netG.eval()
+
+    from typhoon_utils import quick_ensemble_test_and_plot
+    quick_ensemble_test_and_plot(
+        val_loader,
+        samples_fn=lambda x, n: torch.stack([netG(x) for _ in range(n)]),
+        save_path='typhoon_gan_prediction.png',
+        title='GAN Typhoon Ensemble Prediction',
+        n_samples=20
+    )
     print("训练完成!")
 
 
