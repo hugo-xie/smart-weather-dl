@@ -74,26 +74,37 @@ for year in range(2010, 2021):
 ```python
 import xarray as xr
 import numpy as np
-from skimage.transform import resize
+import glob
 
-# 读取高分辨率数据
-ds = xr.open_dataset('era5_t2m_025deg.nc')
-t2m_hr = ds['t2m'].values  # shape: (time, lat, lon)，单位 K
+files = sorted(glob.glob("era5_t2m_yearly/era5_t2m_025deg_*.nc"))
 
-# 生成低分辨率数据（1°）：通过空间粗化
-t2m_lr_xr = ds['t2m'].coarsen(latitude=4, longitude=4, boundary='trim').mean()
-t2m_lr = t2m_lr_xr.values  # shape: (time, lat_lr, lon_lr)
+ds = xr.open_mfdataset(
+    files,
+    combine="by_coords",
+    chunks={"time": 256}
+)
 
-# 全局归一化（使用训练集统计量）
-t_mean = t2m_hr[:int(0.8*len(t2m_hr))].mean()
-t_std  = t2m_hr[:int(0.8*len(t2m_hr))].std()
+t2m_hr_xr = ds["t2m"]
 
-t2m_hr_norm = (t2m_hr - t_mean) / t_std
-t2m_lr_norm = (t2m_lr - t_mean) / t_std
+t2m_lr_xr = t2m_hr_xr.coarsen(
+    latitude=4,
+    longitude=4,
+    boundary="trim"
+).mean()
 
-print(f"高分辨率形状: {t2m_hr.shape}")
-print(f"低分辨率形状: {t2m_lr.shape}")
-print(f"温度范围: {t2m_hr.min():.1f} K – {t2m_hr.max():.1f} K")
+n_train = int(0.8 * ds.sizes["time"])
+
+t_mean = t2m_hr_xr.isel(time=slice(0, n_train)).mean().compute()
+t_std = t2m_hr_xr.isel(time=slice(0, n_train)).std().compute()
+
+t2m_hr_norm_xr = (t2m_hr_xr - t_mean) / t_std
+t2m_lr_norm_xr = (t2m_lr_xr - t_mean) / t_std
+
+print(f"高分辨率形状: {t2m_hr_xr.shape}")
+print(f"低分辨率形状: {t2m_lr_xr.shape}")
+print(f"训练集均值: {float(t_mean.values):.4f}")
+print(f"训练集标准差: {float(t_std.values):.4f}")
+print(f"温度范围: {float(t2m_hr_xr.min().compute().values):.1f} K – {float(t2m_hr_xr.max().compute().values):.1f} K")
 ```
 
 ---
