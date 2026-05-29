@@ -201,7 +201,7 @@ if __name__ == '__main__':
     INPUT_LEN = 12
     OUTPUT_LEN = 4
     
-    tracks = load_ibtracs_data('ibtracs_wp.csv')
+    tracks = load_ibtracs_data('/root/autodl-tmp/project/project/project/smart-weather-dl-main/dataset/ibtracs.WP.list.v04r00.csv')
     dataset = IBTrACSDataset(tracks=tracks, input_len=INPUT_LEN, output_len=OUTPUT_LEN)
     n_train = int(0.8 * len(dataset))
     train_set, val_set = torch.utils.data.random_split(dataset, [n_train, len(dataset)-n_train])
@@ -212,6 +212,14 @@ if __name__ == '__main__':
     print(f"参数量: {sum(p.numel() for p in model.parameters()):,}")
     
     model = train_typhoon_cnn(model, train_loader, val_loader, num_epochs=50)
+
+    from typhoon_utils import quick_test_and_plot
+    quick_test_and_plot(
+        model,
+        val_loader,
+        save_path='typhoon_cnn_prediction.png',
+        title='CNN Typhoon Track Prediction'
+    )
     print("训练完成! 下一步: 下载真实IBTrACS数据替换模拟数据")
 
 
