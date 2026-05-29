@@ -46,22 +46,22 @@ import cdsapi
 
 c = cdsapi.Client()
 
-# 下载 2m 温度场（高分辨率，0.25°）
-c.retrieve(
-    'reanalysis-era5-single-levels',
-    {
-        'product_type': 'reanalysis',
-        'variable': '2m_temperature',
-        'year': [str(y) for y in range(2010, 2021)],
-        'month': [f'{m:02d}' for m in range(1, 13)],
-        'day': [f'{d:02d}' for d in range(1, 32)],
-        'time': ['00:00', '06:00', '12:00', '18:00'],
-        'area': [55, 70, 15, 140],   # N, W, S, E（中国区域）
-        'grid': [0.25, 0.25],        # 高分辨率
-        'format': 'netcdf',
-    },
-    'era5_t2m_025deg.nc'
-)
+for year in range(2010, 2021):
+    c.retrieve(
+        'reanalysis-era5-single-levels',
+        {
+            'product_type': 'reanalysis',
+            'variable': '2m_temperature',
+            'year': str(year),
+            'month': [f'{m:02d}' for m in range(1, 13)],
+            'day': [f'{d:02d}' for d in range(1, 32)],
+            'time': ['00:00', '06:00', '12:00', '18:00'],
+            'area': [55, 70, 15, 140],
+            'grid': [0.25, 0.25],
+            'format': 'netcdf',
+        },
+        f'era5_t2m_025deg_{year}.nc'
+    )
 ```
 
 > **提示**：完整下载约需 2–4 小时，文件大小约 50–100 GB（10 年数据）。  
