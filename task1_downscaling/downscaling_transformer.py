@@ -7,12 +7,23 @@
 ==============================================
 """
 
+import os
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 import numpy as np
 import math
+from tqdm import tqdm
+
+from download_data import (
+    PROCESSED_DIR,
+    build_dataloaders,
+    preprocess_era5,
+    processed_data_exists,
+)
+from evaluation_utils import evaluate_flat_model, print_metrics
 
 
 class MultiHeadAttention(nn.Module):
@@ -89,7 +100,7 @@ class DownscalingTransformer(nn.Module):
         
         self.decoder = nn.Sequential(
             nn.Linear(d_model * self.n_patches, 2048), nn.GELU(), nn.Dropout(dropout),
-            nn.Linear(2048, hr_h * hr_w), nn.Sigmoid()
+            nn.Linear(2048, hr_h * hr_w)
         )
     
     def extract_patches(self, x):
@@ -129,9 +140,10 @@ def train_transformer(model, train_loader, val_loader, num_epochs=50, lr=1e-4):
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
-        for lr_b, hr_b in train_loader:
+        train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} train", leave=False, ncols=100)
+        for lr_b, hr_b in train_bar:
             lr_b, hr_b = lr_b.to(device), hr_b.to(device)
-            hr_flat = hr_b.view(hr_b.shape[0], -1)
+            hr_flat = hr_b.reshape(hr_b.shape[0], -1)
             optimizer.zero_grad()
             pred = model(lr_b)
             min_size = min(pred.shape[1], hr_flat.shape[1])
@@ -140,23 +152,26 @@ def train_transformer(model, train_loader, val_loader, num_epochs=50, lr=1e-4):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             train_loss += loss.item()
+            train_bar.set_postfix(loss=f"{loss.item():.4f}")
         
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for lr_b, hr_b in val_loader:
+            val_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} val", leave=False, ncols=100)
+            for lr_b, hr_b in val_bar:
                 lr_b, hr_b = lr_b.to(device), hr_b.to(device)
-                hr_flat = hr_b.view(hr_b.shape[0], -1)
+                hr_flat = hr_b.reshape(hr_b.shape[0], -1)
                 pred = model(lr_b)
                 min_size = min(pred.shape[1], hr_flat.shape[1])
-                val_loss += criterion(pred[:, :min_size], hr_flat[:, :min_size]).item()
+                batch_loss = criterion(pred[:, :min_size], hr_flat[:, :min_size]).item()
+                val_loss += batch_loss
+                val_bar.set_postfix(loss=f"{batch_loss:.4f}")
         
         train_loss /= len(train_loader)
         val_loss /= len(val_loader)
         scheduler.step()
         
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch [{epoch+1}/{num_epochs}] Train: {train_loss:.6f} | Val: {val_loss:.6f} | LR: {scheduler.get_last_lr()[0]:.2e}")
+        print(f"Epoch [{epoch+1}/{num_epochs}] Train: {train_loss:.6f} | Val: {val_loss:.6f} | LR: {scheduler.get_last_lr()[0]:.2e}")
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -164,24 +179,77 @@ def train_transformer(model, train_loader, val_loader, num_epochs=50, lr=1e-4):
     return model
 
 
+def _env_int(name, default):
+    value = os.getenv(name)
+    return default if value is None else int(value)
+
+
 if __name__ == '__main__':
+    print("=" * 60)
     print("气象数据降尺度 - Transformer 模型训练")
-    from downscaling_cnn import ERA5DownscalingDataset
-    
-    LR_SIZE = (20, 35)
-    HR_SIZE = (80, 140)
-    
-    dataset = ERA5DownscalingDataset(n_samples=500, lr_size=LR_SIZE, hr_size=HR_SIZE)
-    n_train = int(0.8 * len(dataset))
-    train_set, val_set = torch.utils.data.random_split(dataset, [n_train, len(dataset)-n_train])
-    train_loader = DataLoader(train_set, batch_size=16, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=16, shuffle=False)
-    
-    model = DownscalingTransformer(lr_size=LR_SIZE, hr_size=HR_SIZE, patch_size=4,
-                                    d_model=128, num_heads=4, num_layers=4)
-    print(f"参数量: {sum(p.numel() for p in model.parameters()):,}")
-    
-    model = train_transformer(model, train_loader, val_loader, num_epochs=50)
+    print("=" * 60)
+
+    BATCH_SIZE = _env_int("DOWNSCALING_BATCH_SIZE", 4)
+    NUM_EPOCHS = _env_int("DOWNSCALING_EPOCHS", 50)
+    NUM_WORKERS = _env_int("DOWNSCALING_NUM_WORKERS", 0)
+    MAX_SAMPLES = _env_int("DOWNSCALING_MAX_SAMPLES", 0)
+    EVAL_MAX_BATCHES = _env_int("DOWNSCALING_EVAL_MAX_BATCHES", 0)
+    raw_dir = Path(os.getenv("DOWNSCALING_RAW_DIR", Path(__file__).resolve().parent))
+    data_dir = Path(os.getenv("DOWNSCALING_DATA_DIR", PROCESSED_DIR))
+
+    print("\n[1/4] 准备数据集...")
+    if not processed_data_exists(data_dir):
+        print(f"   未找到预处理数据: {data_dir}")
+        print("   开始从 ERA5 NetCDF 文件生成 train/val/test 数据...")
+        preprocess_era5(raw_dir=raw_dir, output_dir=data_dir)
+    else:
+        print(f"   使用预处理数据: {data_dir}")
+
+    max_samples = None
+    if MAX_SAMPLES > 0:
+        max_samples = {"train": MAX_SAMPLES, "val": MAX_SAMPLES, "test": MAX_SAMPLES}
+        print(f"   调试模式: 每个 split 最多使用 {MAX_SAMPLES} 个样本")
+
+    train_loader, val_loader, test_loader = build_dataloaders(
+        data_dir=data_dir,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        max_samples=max_samples,
+    )
+    metadata = train_loader.dataset.metadata
+    lr_size = tuple(metadata["lr_shape"])
+    hr_size = tuple(metadata["hr_shape"])
+    lr_s, hr_s = train_loader.dataset[0]
+    print(
+        f"   训练: {len(train_loader.dataset)} 样本 | "
+        f"验证: {len(val_loader.dataset)} 样本 | "
+        f"测试: {len(test_loader.dataset)} 样本"
+    )
+    print(f"   LR shape: {tuple(lr_s.shape)} | HR shape: {tuple(hr_s.shape)}")
+
+    print("\n[2/4] 初始化 Transformer...")
+    model = DownscalingTransformer(
+        lr_size=lr_size,
+        hr_size=hr_size,
+        patch_size=4,
+        d_model=128,
+        num_heads=4,
+        num_layers=4,
+    )
+    print(f"   参数量: {sum(p.numel() for p in model.parameters()):,}")
+
+    print("\n[3/4] 开始训练...")
+    model = train_transformer(model, train_loader, val_loader, num_epochs=NUM_EPOCHS)
+
+    print("\n[4/4] 测试集评估...")
+    metrics = evaluate_flat_model(
+        model,
+        test_loader,
+        metadata,
+        desc="Transformer test",
+        max_batches=EVAL_MAX_BATCHES,
+    )
+    print_metrics("测试集评估结果（反归一化到 K）", metrics)
     print("训练完成!")
 
 
