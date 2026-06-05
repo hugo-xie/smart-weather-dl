@@ -8,12 +8,23 @@
 ==============================================
 """
 
+import os
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 import numpy as np
 import math
+from tqdm import tqdm
+
+from download_data import (
+    PROCESSED_DIR,
+    build_dataloaders,
+    preprocess_era5,
+    processed_data_exists,
+)
+from evaluation_utils import evaluate_diffusion_noise_loss, print_metrics
 
 
 class SinusoidalTimeEmbedding(nn.Module):
@@ -113,8 +124,8 @@ class DDPM:
     def q_sample(self, x_0, t, noise=None):
         if noise is None: noise = torch.randn_like(x_0)
         device = x_0.device
-        sa = self.sqrt_alphas_cumprod[t].to(device).view(-1, 1, 1, 1)
-        sm = self.sqrt_one_minus_alphas_cumprod[t].to(device).view(-1, 1, 1, 1)
+        sa = self.sqrt_alphas_cumprod.to(device)[t].view(-1, 1, 1, 1)
+        sm = self.sqrt_one_minus_alphas_cumprod.to(device)[t].view(-1, 1, 1, 1)
         return sa * x_0 + sm * noise
     
     def p_losses(self, x_0, condition, t):
@@ -159,7 +170,8 @@ def train_diffusion(ddpm, train_loader, num_epochs=100, lr=2e-4):
     for epoch in range(num_epochs):
         ddpm.model.train()
         epoch_loss = 0.0
-        for lr_b, hr_b in train_loader:
+        train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} train", leave=False, ncols=100)
+        for lr_b, hr_b in train_bar:
             lr_b, hr_b = lr_b.to(device), hr_b.to(device)
             t = torch.randint(0, ddpm.T, (hr_b.shape[0],), device=device)
             optimizer.zero_grad()
@@ -168,39 +180,98 @@ def train_diffusion(ddpm, train_loader, num_epochs=100, lr=2e-4):
             torch.nn.utils.clip_grad_norm_(ddpm.model.parameters(), 1.0)
             optimizer.step()
             epoch_loss += loss.item()
+            train_bar.set_postfix(loss=f"{loss.item():.4f}")
         
         epoch_loss /= len(train_loader)
+        print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {epoch_loss:.6f}")
         if (epoch + 1) % 20 == 0:
-            print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {epoch_loss:.6f}")
             torch.save(ddpm.model.state_dict(), 'best_downscaling_diffusion.pth')
     return ddpm
 
 
+def _env_int(name, default):
+    value = os.getenv(name)
+    return default if value is None else int(value)
+
+
 if __name__ == '__main__':
+    print("=" * 60)
     print("气象数据降尺度 - Diffusion Model 训练")
-    from downscaling_cnn import ERA5DownscalingDataset
-    
-    LR_SIZE = (20, 35)
-    HR_SIZE = (80, 140)
-    NUM_TIMESTEPS = 200  # 演示用减少步数, 实际建议1000
-    
-    dataset = ERA5DownscalingDataset(n_samples=300, lr_size=LR_SIZE, hr_size=HR_SIZE)
-    train_loader = DataLoader(dataset, batch_size=8, shuffle=True)
-    
+    print("=" * 60)
+
+    BATCH_SIZE = _env_int("DOWNSCALING_BATCH_SIZE", 2)
+    NUM_EPOCHS = _env_int("DOWNSCALING_EPOCHS", 50)
+    NUM_WORKERS = _env_int("DOWNSCALING_NUM_WORKERS", 0)
+    MAX_SAMPLES = _env_int("DOWNSCALING_MAX_SAMPLES", 0)
+    EVAL_MAX_BATCHES = _env_int("DOWNSCALING_EVAL_MAX_BATCHES", 0)
+    NUM_TIMESTEPS = _env_int("DOWNSCALING_DIFFUSION_TIMESTEPS", 200)
+    SAMPLE_STEPS = _env_int("DOWNSCALING_DIFFUSION_SAMPLE_STEPS", min(NUM_TIMESTEPS, 50))
+    raw_dir = Path(os.getenv("DOWNSCALING_RAW_DIR", Path(__file__).resolve().parent))
+    data_dir = Path(os.getenv("DOWNSCALING_DATA_DIR", PROCESSED_DIR))
+
+    print("\n[1/5] 准备数据集...")
+    if not processed_data_exists(data_dir):
+        print(f"   未找到预处理数据: {data_dir}")
+        print("   开始从 ERA5 NetCDF 文件生成 train/val/test 数据...")
+        preprocess_era5(raw_dir=raw_dir, output_dir=data_dir)
+    else:
+        print(f"   使用预处理数据: {data_dir}")
+
+    max_samples = None
+    if MAX_SAMPLES > 0:
+        max_samples = {"train": MAX_SAMPLES, "val": MAX_SAMPLES, "test": MAX_SAMPLES}
+        print(f"   调试模式: 每个 split 最多使用 {MAX_SAMPLES} 个样本")
+
+    train_loader, val_loader, test_loader = build_dataloaders(
+        data_dir=data_dir,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        max_samples=max_samples,
+    )
+    metadata = train_loader.dataset.metadata
+    hr_h, hr_w = metadata["hr_shape"]
+    lr_s, hr_s = train_loader.dataset[0]
+    print(
+        f"   训练: {len(train_loader.dataset)} 样本 | "
+        f"验证: {len(val_loader.dataset)} 样本 | "
+        f"测试: {len(test_loader.dataset)} 样本"
+    )
+    print(f"   LR shape: {tuple(lr_s.shape)} | HR shape: {tuple(hr_s.shape)}")
+
+    print("\n[2/5] 初始化扩散模型...")
     unet = ConditionedUNet(in_channels=2, base_channels=16, time_dim=64)
     ddpm = DDPM(unet, num_timesteps=NUM_TIMESTEPS)
-    print(f"UNet参数量: {sum(p.numel() for p in unet.parameters()):,}")
-    
-    ddpm = train_diffusion(ddpm, train_loader, num_epochs=50)
-    
-    # 演示不确定性量化
-    print("\\n生成5个样本演示不确定性量化...")
+    print(f"   UNet参数量: {sum(p.numel() for p in unet.parameters()):,}")
+    print(f"   扩散步数: {NUM_TIMESTEPS}")
+
+    print("\n[3/5] 开始训练...")
+    ddpm = train_diffusion(ddpm, train_loader, num_epochs=NUM_EPOCHS)
+
+    print("\n[4/5] 测试集噪声预测评估...")
+    metrics = evaluate_diffusion_noise_loss(
+        ddpm,
+        test_loader,
+        desc="Diffusion test",
+        max_batches=EVAL_MAX_BATCHES,
+    )
+    print_metrics("测试集评估结果（扩散噪声预测）", metrics)
+
+    print("\n[5/5] 生成5个样本演示不确定性量化...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    lr_s, _ = next(iter(train_loader))
-    lr_s = lr_s[:1].to(device)
-    samples = [ddpm.sample(lr_s, (1, 1, HR_SIZE[0], HR_SIZE[1])).cpu().numpy() for _ in range(5)]
+    ddpm.model.eval()
+    lr_batch, _ = next(iter(test_loader))
+    lr_batch = lr_batch[:1].to(device)
+    samples = [
+        ddpm.sample(
+            lr_batch,
+            (1, 1, hr_h, hr_w),
+            num_steps=SAMPLE_STEPS,
+        ).cpu().numpy()
+        for _ in range(5)
+    ]
     samples = np.array(samples)
-    print(f"样本标准差 (不确定性): {samples.std():.4f}")
+    print(f"   采样步数: {SAMPLE_STEPS}")
+    print(f"   样本标准差 (不确定性, normalized units): {samples.std():.4f}")
     print("训练完成!")
 
 
