@@ -8,11 +8,22 @@
 ==============================================
 """
 
+import os
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 import numpy as np
+from tqdm import tqdm
+
+from download_data import (
+    PROCESSED_DIR,
+    build_dataloaders,
+    preprocess_era5,
+    processed_data_exists,
+)
+from evaluation_utils import evaluate_image_model, print_metrics
 
 
 class ResidualBlockG(nn.Module):
@@ -50,13 +61,12 @@ class DownscalingGenerator(nn.Module):
         for _ in range(int(np.log2(scale_factor))):
             upsampler_layers.append(PixelShuffleUpsampler(channels, 2))
         self.upsamplers = nn.Sequential(*upsampler_layers)
-        self.tail = nn.Sequential(nn.Conv2d(channels, 1, 9, padding=4), nn.Tanh())
+        self.tail = nn.Conv2d(channels, 1, 9, padding=4)
     
     def forward(self, x):
         head_out = self.head(x)
         res_out = self.post_res(self.residual_blocks(head_out)) + head_out
-        out = self.tail(self.upsamplers(res_out))
-        return (out + 1) / 2  # 映射到[0,1]
+        return self.tail(self.upsamplers(res_out))
 
 
 class PatchDiscriminator(nn.Module):
@@ -94,23 +104,30 @@ def train_gan(netG, netD, train_loader, num_epochs=100, lr_g=1e-4, lr_d=1e-4):
     print(f"阶段1: 预训练生成器 ({pretrain_epochs} epochs)...")
     for epoch in range(pretrain_epochs):
         netG.train()
-        for lr_b, hr_b in train_loader:
+        train_bar = tqdm(train_loader, desc=f"Pretrain {epoch+1}/{pretrain_epochs}", leave=False, ncols=100)
+        pretrain_loss = 0.0
+        for lr_b, hr_b in train_bar:
             lr_b, hr_b = lr_b.to(device), hr_b.to(device)
             opt_G.zero_grad()
             fake_hr = netG(lr_b)
             min_h = min(fake_hr.shape[2], hr_b.shape[2])
             min_w = min(fake_hr.shape[3], hr_b.shape[3])
-            criterion_mse(fake_hr[:,:,:min_h,:min_w], hr_b[:,:,:min_h,:min_w]).backward()
+            loss = criterion_mse(fake_hr[:,:,:min_h,:min_w], hr_b[:,:,:min_h,:min_w])
+            loss.backward()
             opt_G.step()
-        if (epoch + 1) % 5 == 0: print(f"   预训练 Epoch {epoch+1}/{pretrain_epochs}")
+            pretrain_loss += loss.item()
+            train_bar.set_postfix(loss=f"{loss.item():.4f}")
+        print(f"   预训练 Epoch [{epoch+1}/{pretrain_epochs}] G_MSE: {pretrain_loss/len(train_loader):.6f}")
     
     # 阶段2: 对抗训练
     print("阶段2: 对抗训练...")
-    for epoch in range(num_epochs - pretrain_epochs):
+    adversarial_epochs = num_epochs - pretrain_epochs
+    for epoch in range(adversarial_epochs):
         netG.train(); netD.train()
         d_loss_total = g_loss_total = 0.0
+        train_bar = tqdm(train_loader, desc=f"GAN {epoch+1}/{adversarial_epochs}", leave=False, ncols=100)
         
-        for lr_b, hr_b in train_loader:
+        for lr_b, hr_b in train_bar:
             lr_b, hr_b = lr_b.to(device), hr_b.to(device)
             fake_hr = netG(lr_b)
             min_h = min(fake_hr.shape[2], hr_b.shape[2])
@@ -128,16 +145,17 @@ def train_gan(netG, netD, train_loader, num_epochs=100, lr_g=1e-4, lr_d=1e-4):
             
             # 训练生成器
             opt_G.zero_grad()
-            g_adv = criterion_bce(netD(fake_hr_a), torch.ones_like(netD(fake_hr_a)))
+            fake_for_g = netD(fake_hr_a)
+            g_adv = criterion_bce(fake_for_g, torch.ones_like(fake_for_g))
             g_content = criterion_mse(fake_hr_a, hr_a)
             g_loss = g_content + 0.001 * g_adv
             g_loss.backward(); opt_G.step()
             
             d_loss_total += d_loss.item()
             g_loss_total += g_loss.item()
+            train_bar.set_postfix(D=f"{d_loss.item():.4f}", G=f"{g_loss.item():.4f}")
         
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch [{epoch+1}/{num_epochs-pretrain_epochs}] D: {d_loss_total/len(train_loader):.4f} | G: {g_loss_total/len(train_loader):.4f}")
+        print(f"Epoch [{epoch+1}/{adversarial_epochs}] D: {d_loss_total/len(train_loader):.4f} | G: {g_loss_total/len(train_loader):.4f}")
         
         if (epoch + 1) % 20 == 0:
             torch.save(netG.state_dict(), 'best_downscaling_gan_g.pth')
@@ -145,19 +163,71 @@ def train_gan(netG, netD, train_loader, num_epochs=100, lr_g=1e-4, lr_d=1e-4):
     return netG, netD
 
 
+def _env_int(name, default):
+    value = os.getenv(name)
+    return default if value is None else int(value)
+
+
 if __name__ == '__main__':
+    print("=" * 60)
     print("气象数据降尺度 - GAN 模型训练")
-    from downscaling_cnn import ERA5DownscalingDataset
-    
-    dataset = ERA5DownscalingDataset(n_samples=400, lr_size=(20, 35), hr_size=(80, 140))
-    train_loader = DataLoader(dataset, batch_size=8, shuffle=True)
-    
-    netG = DownscalingGenerator(scale_factor=4, num_res_blocks=4, channels=32)
+    print("=" * 60)
+
+    BATCH_SIZE = _env_int("DOWNSCALING_BATCH_SIZE", 4)
+    NUM_EPOCHS = _env_int("DOWNSCALING_EPOCHS", 60)
+    NUM_WORKERS = _env_int("DOWNSCALING_NUM_WORKERS", 0)
+    MAX_SAMPLES = _env_int("DOWNSCALING_MAX_SAMPLES", 0)
+    EVAL_MAX_BATCHES = _env_int("DOWNSCALING_EVAL_MAX_BATCHES", 0)
+    raw_dir = Path(os.getenv("DOWNSCALING_RAW_DIR", Path(__file__).resolve().parent))
+    data_dir = Path(os.getenv("DOWNSCALING_DATA_DIR", PROCESSED_DIR))
+
+    print("\n[1/4] 准备数据集...")
+    if not processed_data_exists(data_dir):
+        print(f"   未找到预处理数据: {data_dir}")
+        print("   开始从 ERA5 NetCDF 文件生成 train/val/test 数据...")
+        preprocess_era5(raw_dir=raw_dir, output_dir=data_dir)
+    else:
+        print(f"   使用预处理数据: {data_dir}")
+
+    max_samples = None
+    if MAX_SAMPLES > 0:
+        max_samples = {"train": MAX_SAMPLES, "val": MAX_SAMPLES, "test": MAX_SAMPLES}
+        print(f"   调试模式: 每个 split 最多使用 {MAX_SAMPLES} 个样本")
+
+    train_loader, val_loader, test_loader = build_dataloaders(
+        data_dir=data_dir,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        max_samples=max_samples,
+    )
+    metadata = train_loader.dataset.metadata
+    scale_factor = int(metadata.get("scale_factor", 4))
+    lr_s, hr_s = train_loader.dataset[0]
+    print(
+        f"   训练: {len(train_loader.dataset)} 样本 | "
+        f"验证: {len(val_loader.dataset)} 样本 | "
+        f"测试: {len(test_loader.dataset)} 样本"
+    )
+    print(f"   LR shape: {tuple(lr_s.shape)} | HR shape: {tuple(hr_s.shape)}")
+
+    print("\n[2/4] 初始化 GAN...")
+    netG = DownscalingGenerator(scale_factor=scale_factor, num_res_blocks=4, channels=32)
     netD = PatchDiscriminator()
-    print(f"生成器参数: {sum(p.numel() for p in netG.parameters()):,}")
-    print(f"判别器参数: {sum(p.numel() for p in netD.parameters()):,}")
-    
-    netG, netD = train_gan(netG, netD, train_loader, num_epochs=60)
+    print(f"   生成器参数: {sum(p.numel() for p in netG.parameters()):,}")
+    print(f"   判别器参数: {sum(p.numel() for p in netD.parameters()):,}")
+
+    print("\n[3/4] 开始训练...")
+    netG, netD = train_gan(netG, netD, train_loader, num_epochs=NUM_EPOCHS)
+
+    print("\n[4/4] 测试集评估...")
+    metrics = evaluate_image_model(
+        netG,
+        test_loader,
+        metadata,
+        desc="GAN test",
+        max_batches=EVAL_MAX_BATCHES,
+    )
+    print_metrics("测试集评估结果（反归一化到 K）", metrics)
     print("训练完成!")
 
 
