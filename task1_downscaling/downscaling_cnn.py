@@ -8,11 +8,23 @@
 ==============================================
 """
 
+import os
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
 import numpy as np
+from tqdm import tqdm
+
+from download_data import (
+    PROCESSED_DIR,
+    ERA5DownscalingDataset,
+    build_dataloaders,
+    preprocess_era5,
+    processed_data_exists,
+)
+from evaluation_utils import evaluate_image_model, print_metrics
 
 # ============================================================
 # 数据下载说明 (使用CDS API)
@@ -40,66 +52,8 @@ import numpy as np
 # ============================================================
 # 数据集类
 # ============================================================
-
-class ERA5DownscalingDataset(Dataset):
-    """
-    ERA5降尺度数据集
-    
-    使用模拟数据演示 - 实际使用时替换为真实ERA5数据
-    真实数据读取示例:
-        import xarray as xr
-        ds = xr.open_dataset('era5_t2m_025deg.nc')
-        t2m_hr = ds['t2m'].values  # (time, lat, lon)
-        t2m_lr = ds['t2m'].coarsen(latitude=4, longitude=4).mean().values
-    """
-    def __init__(self, n_samples=500, lr_size=(20, 35), hr_size=(80, 140)):
-        self.n_samples = n_samples
-        self.lr_h, self.lr_w = lr_size
-        self.hr_h, self.hr_w = hr_size
-        
-        print("注意: 当前使用模拟数据。实际使用时请替换为ERA5真实数据。")
-        print("ERA5数据获取: https://cds.climate.copernicus.eu/")
-        
-        self.lr_data = []
-        self.hr_data = []
-        
-        for _ in range(n_samples):
-            hr_field = self._generate_realistic_field((self.hr_h, self.hr_w))
-            lr_field = self._downsample(hr_field, (self.lr_h, self.lr_w))
-            self.lr_data.append(lr_field)
-            self.hr_data.append(hr_field)
-        
-        self.lr_data = np.array(self.lr_data, dtype=np.float32)
-        self.hr_data = np.array(self.hr_data, dtype=np.float32)
-        
-        # 归一化到 [0, 1]
-        self.t_min = self.hr_data.min()
-        self.t_max = self.hr_data.max()
-        self.lr_data = (self.lr_data - self.t_min) / (self.t_max - self.t_min)
-        self.hr_data = (self.hr_data - self.t_min) / (self.t_max - self.t_min)
-    
-    def _generate_realistic_field(self, size):
-        """生成具有空间相关性的模拟温度场"""
-        from scipy.ndimage import gaussian_filter
-        H, W = size
-        x = np.linspace(0, 2*np.pi, W)
-        y = np.linspace(0, 2*np.pi, H)
-        X, Y = np.meshgrid(x, y)
-        base = 285 + 15 * np.sin(Y * 0.5)
-        noise = np.random.randn(H, W) * 3
-        return gaussian_filter(base + noise, sigma=3)
-    
-    def _downsample(self, field, target_size):
-        from skimage.transform import resize
-        return resize(field, target_size, anti_aliasing=True)
-    
-    def __len__(self):
-        return self.n_samples
-    
-    def __getitem__(self, idx):
-        lr = torch.FloatTensor(self.lr_data[idx]).unsqueeze(0)
-        hr = torch.FloatTensor(self.hr_data[idx]).unsqueeze(0)
-        return lr, hr
+# ERA5DownscalingDataset 在 download_data.py 中实现。
+# 这里保留同名导入，方便其他脚本继续 from downscaling_cnn import ERA5DownscalingDataset。
 
 
 # ============================================================
@@ -168,7 +122,8 @@ def train_model(model, train_loader, val_loader, num_epochs=50, lr=1e-4):
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
-        for lr_batch, hr_batch in train_loader:
+        train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} train", leave=False, ncols=100)
+        for lr_batch, hr_batch in train_bar:
             lr_batch, hr_batch = lr_batch.to(device), hr_batch.to(device)
             optimizer.zero_grad()
             pred = model(lr_batch)
@@ -178,16 +133,20 @@ def train_model(model, train_loader, val_loader, num_epochs=50, lr=1e-4):
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
+            train_bar.set_postfix(loss=f"{loss.item():.4f}")
         
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for lr_batch, hr_batch in val_loader:
+            val_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} val", leave=False, ncols=100)
+            for lr_batch, hr_batch in val_bar:
                 lr_batch, hr_batch = lr_batch.to(device), hr_batch.to(device)
                 pred = model(lr_batch)
                 min_h = min(pred.shape[2], hr_batch.shape[2])
                 min_w = min(pred.shape[3], hr_batch.shape[3])
-                val_loss += criterion(pred[:,:,:min_h,:min_w], hr_batch[:,:,:min_h,:min_w]).item()
+                batch_loss = criterion(pred[:,:,:min_h,:min_w], hr_batch[:,:,:min_h,:min_w]).item()
+                val_loss += batch_loss
+                val_bar.set_postfix(loss=f"{batch_loss:.4f}")
         
         train_loss /= len(train_loader)
         val_loss /= len(val_loader)
@@ -195,8 +154,7 @@ def train_model(model, train_loader, val_loader, num_epochs=50, lr=1e-4):
         val_losses.append(val_loss)
         scheduler.step()
         
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch [{epoch+1}/{num_epochs}] Train: {train_loss:.6f} | Val: {val_loss:.6f}")
+        print(f"Epoch [{epoch+1}/{num_epochs}] Train: {train_loss:.6f} | Val: {val_loss:.6f}")
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -219,47 +177,81 @@ def calculate_metrics(pred, target):
 # 主程序
 # ============================================================
 
+def _env_int(name, default):
+    value = os.getenv(name)
+    return default if value is None else int(value)
+
+
 if __name__ == '__main__':
     print("=" * 60)
     print("气象数据降尺度 - CNN 模型训练")
     print("=" * 60)
-    
-    BATCH_SIZE = 16
-    NUM_EPOCHS = 50
-    LR_SIZE = (20, 35)
-    HR_SIZE = (80, 140)
-    
-    print("\\n[1/4] 准备数据集...")
-    dataset = ERA5DownscalingDataset(n_samples=500, lr_size=LR_SIZE, hr_size=HR_SIZE)
-    n_train = int(0.8 * len(dataset))
-    train_set, val_set = torch.utils.data.random_split(dataset, [n_train, len(dataset)-n_train])
-    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-    print(f"   训练: {n_train} 样本 | 验证: {len(dataset)-n_train} 样本")
-    
-    print("\\n[2/4] 初始化CNN模型...")
-    model = DownscalingCNN(scale_factor=4, num_residual_blocks=4)
+
+    BATCH_SIZE = _env_int("DOWNSCALING_BATCH_SIZE", 4)
+    NUM_EPOCHS = _env_int("DOWNSCALING_EPOCHS", 50)
+    NUM_WORKERS = _env_int("DOWNSCALING_NUM_WORKERS", 0)
+    MAX_SAMPLES = _env_int("DOWNSCALING_MAX_SAMPLES", 0)
+    EVAL_MAX_BATCHES = _env_int("DOWNSCALING_EVAL_MAX_BATCHES", 0)
+    raw_dir = Path(os.getenv("DOWNSCALING_RAW_DIR", Path(__file__).resolve().parent))
+    data_dir = Path(os.getenv("DOWNSCALING_DATA_DIR", PROCESSED_DIR))
+
+    print("\n[1/4] 准备数据集...")
+    if not processed_data_exists(data_dir):
+        print(f"   未找到预处理数据: {data_dir}")
+        print("   开始从 ERA5 NetCDF 文件生成 train/val/test 数据...")
+        preprocess_era5(raw_dir=raw_dir, output_dir=data_dir)
+    else:
+        print(f"   使用预处理数据: {data_dir}")
+
+    max_samples = None
+    if MAX_SAMPLES > 0:
+        max_samples = {"train": MAX_SAMPLES, "val": MAX_SAMPLES, "test": MAX_SAMPLES}
+        print(f"   调试模式: 每个 split 最多使用 {MAX_SAMPLES} 个样本")
+
+    train_loader, val_loader, test_loader = build_dataloaders(
+        data_dir=data_dir,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        max_samples=max_samples,
+    )
+    metadata = train_loader.dataset.metadata
+    sample_lr, sample_hr = train_loader.dataset[0]
+    scale_factor = int(metadata.get("scale_factor", 4))
+
+    print(
+        f"   训练: {len(train_loader.dataset)} 样本 | "
+        f"验证: {len(val_loader.dataset)} 样本 | "
+        f"测试: {len(test_loader.dataset)} 样本"
+    )
+    print(f"   LR shape: {tuple(sample_lr.shape)} | HR shape: {tuple(sample_hr.shape)}")
+    print(
+        "   年份划分: train=2010-2017 | val=2018-2019 | test=2020"
+    )
+
+    print("\n[2/4] 初始化CNN模型...")
+    model = DownscalingCNN(scale_factor=scale_factor, num_residual_blocks=4)
     print(f"   参数量: {sum(p.numel() for p in model.parameters()):,}")
-    
-    print("\\n[3/4] 开始训练...")
-    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=NUM_EPOCHS)
+
+    print("\n[3/4] 开始训练...")
+    train_losses, val_losses = train_model(
+        model,
+        train_loader,
+        val_loader,
+        num_epochs=NUM_EPOCHS,
+    )
     print(f"   最终训练损失: {train_losses[-1]:.6f} | 验证损失: {val_losses[-1]:.6f}")
-    
-    print("\\n[4/4] 评估...")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.eval()
-    with torch.no_grad():
-        lr_s, hr_s = next(iter(val_loader))
-        pred_s = model(lr_s.to(device))
-        min_h = min(pred_s.shape[2], hr_s.shape[2])
-        min_w = min(pred_s.shape[3], hr_s.shape[3])
-        metrics = calculate_metrics(pred_s[0,0,:min_h,:min_w], hr_s[0,0,:min_h,:min_w].to(device))
-    
-    print("\\n评估结果:")
-    for k, v in metrics.items():
-        print(f"   {k}: {v:.4f}")
-    
-    print("\\n训练完成! 下一步: 替换模拟数据为真实ERA5数据")
+
+    print("\n[4/4] 测试集评估...")
+    metrics = evaluate_image_model(
+        model,
+        test_loader,
+        metadata,
+        desc="CNN test",
+        max_batches=EVAL_MAX_BATCHES,
+    )
+    print_metrics("测试集评估结果（反归一化到 K）", metrics)
+
+    print("\n训练完成! 最佳模型已保存为 best_downscaling_cnn.pth")
 
 
 # ============================================================
