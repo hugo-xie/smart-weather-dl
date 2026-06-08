@@ -64,10 +64,7 @@ for year in range(2010, 2021):
     )
 ```
 
-> **Note**: The full download usually takes about 2-4 hours, and the file size is about 50-100 GB for the full data range.  
-> It is recommended to download one year first, about 5-10 GB, for testing.
 
----
 
 ## Step 4: Run the Preprocessing Script
 
